@@ -63,6 +63,9 @@ public final class DrivetrainSim {
     public double update(boolean running, double throttle, boolean clutchHeld, boolean semiAuto,
                          boolean shiftUpEdge, boolean shiftDownEdge, double wheelOmega, double dt, boolean pitLimiter) {
         double inertia = Config.ENGINE_INERTIA.getAsDouble();
+                         boolean shiftUpEdge, boolean shiftDownEdge, double wheelOmega, double dt) {
+        double engineScale = MassScale.design(this.spec.designVehicleMassBlocks());
+        double inertia = Config.ENGINE_INERTIA.getAsDouble() * engineScale;
         double omega = this.rpm / RAD_TO_RPM;
         double maxOmega = this.spec.redlineRpm() * 1.05 / RAD_TO_RPM;
 
@@ -125,7 +128,7 @@ public final class DrivetrainSim {
         double grabFrac = CLUTCH_LAUNCH_GRAB + (CLUTCH_HOLD_GRAB - CLUTCH_LAUNCH_GRAB) * over;
 
         double launchGrab = disengaged ? 0.0
-                : Mth.clamp(grabFrac * tEng / Config.CLUTCH_MAX_TORQUE.getAsDouble(), 0.0, 1.0) * aboveIdle;
+                : Mth.clamp(grabFrac * tEng / (Config.CLUTCH_MAX_TORQUE.getAsDouble() * engineScale), 0.0, 1.0) * aboveIdle;
 
         double overspeed = disengaged ? 0.0
                 : Mth.clamp((this.rpm - launchTarget - CLUTCH_FLARE_BAND) / CLUTCH_DUMP_BAND, 0.0, 1.0);
@@ -150,7 +153,7 @@ public final class DrivetrainSim {
             return record(tEng, ratio, 0.0, false);
         }
 
-        double tCap = Config.CLUTCH_MAX_TORQUE.getAsDouble() * this.clutchEngage;
+        double tCap = (Config.CLUTCH_MAX_TORQUE.getAsDouble() * engineScale) * this.clutchEngage;
         double kc = Config.CLUTCH_LOCK_STIFFNESS.getAsDouble();
 
         double omegaStick = (omega + dt / inertia * (tEng + kc * omegaGb)) / (1.0 + dt * kc / inertia);
@@ -171,6 +174,8 @@ public final class DrivetrainSim {
             this.rpm = 12000.0; //what is the pit lim rpm?, apperantly no one enter the pitlane (before the line) at higher gear than 1st gear, so 12k at 1st gear is ~~80kph
         }
         double wheelTorque = tClutch * ratio * Config.DRIVELINE_EFFICIENCY.getAsDouble();
+
+        double wheelTorque = tClutch * ratio * this.spec.drivelineEfficiency();
         return record(tEng, ratio, wheelTorque, locked);
     }
 
@@ -180,8 +185,7 @@ public final class DrivetrainSim {
 
 
     private double idleHoldThrottle() {
-        double scale = Config.ENGINE_PEAK_TORQUE.getAsDouble() / this.spec.peakTorque();
-        double idleTorque = this.spec.torqueAt(this.spec.idleRpm()) * scale;
+        double idleTorque = this.spec.torqueAt(this.spec.idleRpm());
         if (idleTorque <= 1.0e-6) {
             return 0.1;
         }
@@ -191,16 +195,15 @@ public final class DrivetrainSim {
 
     private double netEngineTorque(double effThrottle, double omega) {
         double rpmNow = Math.abs(omega) * RAD_TO_RPM;
-        double scale = Config.ENGINE_PEAK_TORQUE.getAsDouble() / this.spec.peakTorque();
         double combustion = rpmNow >= this.spec.redlineRpm()
                 ? 0.0
-                : effThrottle * this.spec.torqueAt(rpmNow) * scale;
+                : effThrottle * this.spec.torqueAt(rpmNow);
         double sign = omega >= 0.0 ? 1.0 : -1.0;
         return combustion - sign * frictionTorque(rpmNow, effThrottle);
     }
 
     private double frictionTorque(double rpm, double effThrottle) {
-        double base = Config.ENGINE_BRAKE_FRACTION.getAsDouble() * Config.ENGINE_PEAK_TORQUE.getAsDouble();
+        double base = this.spec.engineBrakeFraction() * this.spec.peakTorque();
         double n = Mth.clamp(Math.abs(rpm) / this.spec.redlineRpm(), 0.0, 1.2);
         double mechanical = base * (0.25 + 0.45 * n);
         double pumping = base * (0.35 + 1.40 * n * n) * (1.0 - Mth.clamp(effThrottle, 0.0, 1.0));
@@ -234,7 +237,7 @@ public final class DrivetrainSim {
     // Signed overall ratio from crank -> wheel for gear index; 0 for neutral, negative for reverse
     // Comes from the config now
     private double overallRatio(int gearIndex) {
-        double finalDrive = Config.FINAL_DRIVE.getAsDouble();
+        double finalDrive = this.spec.finalDrive();
         if (gearIndex == GEAR_REVERSE) {
             return -Config.REVERSE_RATIO.getAsDouble() * finalDrive;
         }
