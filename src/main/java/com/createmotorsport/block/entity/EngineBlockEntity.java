@@ -255,11 +255,9 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
         boolean semiAuto = Config.SEMI_AUTO_SHIFT.get();
         double totalTorque = drivetrain.update(running, throttle, clutchHeld, semiAuto, shiftUpEdge, shiftDownEdge,
                 avgOmega, 1.0 / 20.0, pitLimiter);
-        totalTorque *= powerFactor(driving && auxOvertake, peakOmega, peakLatUse, avgOmega,repRadius, running,
-                avgOmega, 1.0 / 20.0);
         totalTorque *= drivetrain.spec().drivetrainTorqueScale() * Config.DRIVETRAIN_TRIM.getAsDouble();
-        totalTorque *= powerFactor(driving && auxOvertake, peakOmega, peakLatUse, repRadius, running,
-                tractionForce, Math.abs(totalTorque));
+        /*totalTorque *= powerFactor(driving && auxOvertake, peakOmega, peakLatUse, repRadius, running,
+        tractionForce, Math.abs(totalTorque));*/
 
         this.telemAvgWheelOmega = avgOmega;
         this.telemWheelTorqueTotal = totalTorque;

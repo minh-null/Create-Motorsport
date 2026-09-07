@@ -62,8 +62,6 @@ public final class DrivetrainSim {
     private boolean pitLimiter;
     public double update(boolean running, double throttle, boolean clutchHeld, boolean semiAuto,
                          boolean shiftUpEdge, boolean shiftDownEdge, double wheelOmega, double dt, boolean pitLimiter) {
-        double inertia = Config.ENGINE_INERTIA.getAsDouble();
-                         boolean shiftUpEdge, boolean shiftDownEdge, double wheelOmega, double dt) {
         double engineScale = MassScale.design(this.spec.designVehicleMassBlocks());
         double inertia = Config.ENGINE_INERTIA.getAsDouble() * engineScale;
         double omega = this.rpm / RAD_TO_RPM;
@@ -173,7 +171,6 @@ public final class DrivetrainSim {
         if (pitLimiter && this.rpm > 12000) {
             this.rpm = 12000.0; //what is the pit lim rpm?, apperantly no one enter the pitlane (before the line) at higher gear than 1st gear, so 12k at 1st gear is ~~80kph
         }
-        double wheelTorque = tClutch * ratio * Config.DRIVELINE_EFFICIENCY.getAsDouble();
 
         double wheelTorque = tClutch * ratio * this.spec.drivelineEfficiency();
         return record(tEng, ratio, wheelTorque, locked);
