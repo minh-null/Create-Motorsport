@@ -24,6 +24,7 @@ import net.neoforged.neoforge.common.NeoForge;
 public class CreateMotorsportClient {
     public CreateMotorsportClient(IEventBus modEventBus, ModContainer container) {
         MotorsportPartialModels.init();
+        com.createmotorsport.client.TrailerRenderer.init();
         modEventBus.addListener(this::registerMenuScreens);
         modEventBus.addListener(this::registerRenderers);
         modEventBus.addListener(MotorsportKeybinds::register);
@@ -37,20 +38,27 @@ public class CreateMotorsportClient {
         NeoForge.EVENT_BUS.addListener(MotorsportCommands::register);
         NeoForge.EVENT_BUS.addListener(com.createmotorsport.client.MotorsportHud::onRenderGui);
         NeoForge.EVENT_BUS.addListener(com.createmotorsport.client.SkidmarkManager::onRenderLevel);
+        NeoForge.EVENT_BUS.addListener(com.createmotorsport.client.LapGateLinkPreview::onClientTick);
+        NeoForge.EVENT_BUS.addListener(com.createmotorsport.client.GhostManager::onRenderLevel);
         NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.level.LevelEvent.Unload e) -> {
             if (e.getLevel().isClientSide()) {
                 com.createmotorsport.client.SkidmarkManager.clear();
+                com.createmotorsport.client.GhostManager.clear();
             }
         });
     }
 
     private void registerMenuScreens(RegisterMenuScreensEvent event) {
+        event.register(com.createmotorsport.trailer.TrailerRegistry.PANEL_MENU.get(), com.createmotorsport.client.TrailerScreen::new);
         event.register(CreateMotorsport.ENGINE_MENU.get(), EngineScreen::new);
         event.register(CreateMotorsport.SUSPENSION_MENU.get(), SuspensionScreen::new);
         event.register(CreateMotorsport.STEERING_WHEEL_MENU.get(), SteeringWheelScreen::new);
+        event.register(CreateMotorsport.LAP_GATE_MENU.get(), com.createmotorsport.client.LapGateScreen::new);
     }
 
     private void registerRenderers(EntityRenderersEvent.RegisterRenderers event) {
+        event.registerBlockEntityRenderer(com.createmotorsport.trailer.TrailerRegistry.EQUIPMENT_ENTITY.get(), context -> new com.createmotorsport.client.TrailerRenderer());
+        event.registerBlockEntityRenderer(CreateMotorsport.FUEL_PUMP_ENTITY.get(), context -> new com.createmotorsport.client.FuelPumpRenderer());
         event.registerBlockEntityRenderer(CreateMotorsport.SUSPENSION_BLOCK_ENTITY.get(), context -> new SuspensionRenderer());
         event.registerBlockEntityRenderer(CreateMotorsport.STEERING_WHEEL_BLOCK_ENTITY.get(), context -> new SteeringWheelRenderer());
         event.registerBlockEntityRenderer(CreateMotorsport.DOWN_FLAP_BLOCK_ENTITY.get(), DownFlapRenderer::new);

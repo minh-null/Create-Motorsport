@@ -27,7 +27,6 @@ import net.minecraft.world.ContainerHelper;
 import net.minecraft.world.SimpleContainer;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.fluids.FluidStack;
 import net.neoforged.neoforge.fluids.FluidUtil;
@@ -72,12 +71,13 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
         return SLOT_CHANNELS_START + channel.ordinal() * 2 + 1;
     }
 
-    private static final int LAVA_PER_BURN = 100;
+    private static final int FUEL_PER_BURN = 100;
     private static final int BURN_TICKS = 100;
     private static final int SOUND_INTERVAL = 8;
 
     private final DrivetrainSim drivetrain;
-
+    private final EngineSpec baseSpec;
+    private double designMassOverride;
     private int burnTicks;
     private int soundCooldown;
     private float throttle;
@@ -120,11 +120,14 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
     private static final double TCL_SIDE_SLIP = 4.0;     // m/s of sideways slide before the anti-oversteer cut
     private static final double TCL_SIDE_RANGE = 8.0;    // m/s past that over which the cut ramps to the floor
     private static final double TCL_SIDE_FLOOR = 0.5;    // most the lateral cut can trim throttle to
+    private static final double TC_RELEASE_GAIN = 4.0; // multiplies tcRecoverRate at full slip headroom
 
     private int powerMode = MAX_POWER_MODE; // 1 to 8;  torque caps at mode / MAX
     private boolean tractionControl;
     private double telemTcSlipTarget;
+    private double telemTcSlipRatio;
     private double telemTcFactor = 1.0;
+    private double telemTcCapacity = 1.0;
     private double tcIntegral;
     private double tcFactor = 1.0; // last throttle multiplier
     private double boostReserve = 1.0;      // 0 to 1
@@ -154,8 +157,9 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
 
     public EngineBlockEntity(BlockPos pos, BlockState state) {
         super(CreateMotorsport.ENGINE_BLOCK_ENTITY.get(), pos, state);
-        this.drivetrain = new DrivetrainSim(state.is(CreateMotorsport.TRUCK_ENGINE_BLOCK.get())
-                ? EngineSpec.TRUCK_DIESEL : EngineSpec.RACING_V8_HYBRID);
+        this.baseSpec = state.is(CreateMotorsport.TRUCK_ENGINE_BLOCK.get())
+                ? EngineSpec.TRUCK_DIESEL : EngineSpec.RACING_V8_HYBRID;
+        this.drivetrain = new DrivetrainSim(baseSpec);
         for (int slot = 0; slot < SLOT_COUNT; slot++) {
             inventory.setItem(slot, items.get(slot));
         }
@@ -321,6 +325,26 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
         //playEngineSound(running);
     }
 
+    public double getDesignMass() {
+        return designMassOverride > 0.0 ? designMassOverride : baseSpec.designVehicleMassBlocks();
+    }
+
+    public void setDesignMassOverride(double blocks) {
+        double clamped = blocks <= 0.0 ? 0.0 : Mth.clamp(blocks, 1.0, 100000.0);
+        if (clamped == designMassOverride) {
+            return;
+        }
+        designMassOverride = clamped;
+        applyDesignMass();
+        setChanged();
+        sendData();
+    }
+
+    private void applyDesignMass() {
+        drivetrain.setSpec(designMassOverride > 0.0
+                ? baseSpec.withDesignVehicleMass(designMassOverride) : baseSpec);
+    }
+
     public int getRotationDirection() {
         return rotationDirection;
     }
@@ -351,7 +375,7 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
     }
 
     private void updateFuel() {
-        if (burnTicks <= 1 && tryDrainLava()) {
+        if (burnTicks <= 1 && tryDrainFuel()) {
             burnTicks = BURN_TICKS;
             return;
         }
@@ -378,20 +402,20 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
         return Mth.clamp(signalFor(ControlChannel.THROTTLE) / 15.0F, 0.0F, 1.0F);
     }
 
-    private boolean tryDrainLava() {
-        FluidStack lava = new FluidStack(Fluids.LAVA, LAVA_PER_BURN);
+    private boolean tryDrainFuel() {
         for (Direction direction : Direction.values()) {
             IFluidHandler handler = FluidUtil.getFluidHandler(level, worldPosition.relative(direction),
                     direction.getOpposite()).orElse(null);
-            if (handler == null) {
-                continue;
+            if (handler == null) continue;
+            for (int i = 0; i < handler.getTanks(); i++) {
+                FluidStack fuel = handler.getFluidInTank(i).copyWithAmount(FUEL_PER_BURN);
+                if (!com.createmotorsport.fuel.FuelRules.accepts(fuel)) continue;
+                FluidStack simulated = handler.drain(fuel, IFluidHandler.FluidAction.SIMULATE);
+                if (simulated.getAmount() != FUEL_PER_BURN || !FluidStack.isSameFluidSameComponents(fuel, simulated)) continue;
+                FluidStack drained = handler.drain(fuel, IFluidHandler.FluidAction.EXECUTE);
+                if (drained.getAmount() == FUEL_PER_BURN && FluidStack.isSameFluidSameComponents(fuel, drained)) return true;
+                if (!drained.isEmpty()) handler.fill(drained, IFluidHandler.FluidAction.EXECUTE);
             }
-            FluidStack simulated = handler.drain(lava, IFluidHandler.FluidAction.SIMULATE);
-            if (simulated.getAmount() < LAVA_PER_BURN || simulated.getFluid() != Fluids.LAVA) {
-                continue;
-            }
-            handler.drain(lava, IFluidHandler.FluidAction.EXECUTE);
-            return true;
         }
         return false;
     }
@@ -475,7 +499,9 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
             tcIntegral = 0.0;
             tcFactor = 1.0;
             telemTcSlipTarget = Config.TC_TARGET_SLIP.getAsDouble();
+            telemTcSlipRatio = 0.0;
             telemTcFactor = 1.0;
+            telemTcCapacity = 1.0;
             return 1.0;
         }
         Vec3 vel = Sable.HELPER.getVelocity(level, Vec3.atCenterOf(worldPosition));
@@ -484,6 +510,7 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
         double ground = Math.abs(vel.x * fwd.x + vel.z * fwd.z);
         double wheelSurface = Math.abs(peakOmega) * repRadius;
         double slipRatio = (wheelSurface - ground) / Math.max(ground, TC_SPEED_FLOOR);
+        telemTcSlipRatio = slipRatio;
         double latUse = Mth.clamp(peakLatUse, 0.0, 1.0);
         double slipTarget = Config.TC_TARGET_SLIP.getAsDouble() * Math.sqrt(Math.max(0.0, 1.0 - latUse * latUse));
         telemTcSlipTarget = slipTarget;
@@ -499,19 +526,23 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
                 + Config.TC_INTEGRAL.getAsDouble() * tcIntegral;
         double target = Mth.clamp(1.0 - cut, Config.TC_MIN_THROTTLE.getAsDouble(), 1.0);
 
+        double headroom = slipTarget > 1.0e-6 ? Mth.clamp(-error / slipTarget, 0.0, 1.0) : 0.0;
         if (target < tcFactor) {
             tcFactor = target;
         } else {
-            tcFactor = Math.min(target, tcFactor + Config.TC_RECOVER_RATE.getAsDouble());
+            tcFactor = Math.min(target,
+                    tcFactor + Config.TC_RECOVER_RATE.getAsDouble() * (1.0 + TC_RELEASE_GAIN * headroom));
         }
 
-        if (tractionForce > 0.0 && demandTorque > 1.0e-6) {
-            double capacityTorque = tractionForce * repRadius;
-            tcFactor = Math.min(tcFactor, Mth.clamp(capacityTorque / demandTorque, 0.0, 1.0));
-        }
         telemTcFactor = tcFactor;
 
-        double factor = tcFactor;
+        double capacityCap = 1.0;
+        if (tractionForce > 0.0 && demandTorque > 1.0e-6) {
+            capacityCap = Mth.clamp(tractionForce * repRadius / demandTorque, 0.0, 1.0);
+        }
+        telemTcCapacity = capacityCap;
+
+        double factor = Math.min(tcFactor, capacityCap);
         double sideSlip = Math.abs(vel.x * fwd.z - vel.z * fwd.x);
         if (sideSlip > TCL_SIDE_SLIP) {
             factor *= Mth.clamp(1.0 - (sideSlip - TCL_SIDE_SLIP) / TCL_SIDE_RANGE, TCL_SIDE_FLOOR, 1.0);
@@ -548,6 +579,22 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
 
     public boolean isBoosting() {
         return boosting;
+    }
+
+    public double getTcSlipFactor() {
+        return telemTcFactor;
+    }
+
+    public double getTcCapacityFactor() {
+        return telemTcCapacity;
+    }
+
+    public double getTcSlipRatio() {
+        return telemTcSlipRatio;
+    }
+
+    public double getTcSlipTarget() {
+        return telemTcSlipTarget;
     }
 
     public double getPowerFactor() {
@@ -782,6 +829,7 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
         tag.putInt("PowerMode", powerMode);
         tag.putBoolean("TractionControl", tractionControl);
         tag.putInt("RotationDirection", rotationDirection);
+        tag.putDouble("DesignMassOverride", designMassOverride);
         drivetrain.save(tag);
         ContainerHelper.saveAllItems(tag, items, registries);
     }
@@ -794,6 +842,8 @@ public class EngineBlockEntity extends SmartBlockEntity implements dev.ryanhcode
         powerMode = tag.contains("PowerMode") ? Math.max(1, Math.min(MAX_POWER_MODE, tag.getInt("PowerMode"))) : MAX_POWER_MODE;
         tractionControl = tag.getBoolean("TractionControl");
         rotationDirection = tag.getInt("RotationDirection") < 0 ? -1 : 1;
+        designMassOverride = tag.getDouble("DesignMassOverride");
+        applyDesignMass();
         drivetrain.load(tag);
         ContainerHelper.loadAllItems(tag, items, registries);
         for (int slot = 0; slot < SLOT_COUNT; slot++) {

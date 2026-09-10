@@ -3,6 +3,7 @@ package com.createmotorsport.block.entity;
 import com.createmotorsport.Config;
 import com.createmotorsport.CreateMotorsport;
 import com.createmotorsport.block.SuspensionBlock;
+import com.createmotorsport.physics.Gravity;
 import com.createmotorsport.physics.MassScale;
 import com.createmotorsport.physics.TireModel;
 import com.createmotorsport.physics.TireSpec;
@@ -47,7 +48,6 @@ import net.minecraft.world.ContainerHelper;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
@@ -77,18 +77,32 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
     private static final double FOOTPRINT_FRACTION = 0.95;
     private static final int MAX_FOOTPRINT_SAMPLES = 8;
 
+    // Semi-implicit euler holds only to omega*dt < 2, so we need to have this cap
+    // above which a corner just carries its own hardpoint through the unsprung loop instead of freezing
+    // See stepUnsprung
+    private static final double MAX_BODY_MODE_OMEGA_DT = 1.8;
+
     private double lastCastLift;
     private double lastAssistLift;
+
+
     private static final int ASSIST_PROBES = 4;
+    private static final int MAX_ASSIST_PROBES = 12;
+    private static final double ASSIST_PROBE_SPACING = 1.5;
     private static final double ASSIST_RELEASE_RATIO = 3.0;
     private double sprungMassPerWheel = 1.0;
     private double cachedCarMass = MassScale.REFERENCE_CAR_MASS;
     private int cachedWheelCount = 4;
     private double cachedCarSpeed;
+    private double cachedGravity = Gravity.DEFAULT;
+    private double bodyModeOmegaDt;
+    private boolean warnedFastBodyMode;
     private long wheelCountStamp = Long.MIN_VALUE;
     public static final double MAX_TRAVEL = REST_LENGTH - BUMP_STOP_GAP;
     public static final double MAX_DROOP_RENDER = 0.15;
     private static final double GROUND_MARGIN = 0.15;
+
+    private static final double GRAVITY_READ_DIVISOR = 2.1; // this is a magic number from Sable's ServerSubLevel.prePhysicsTick that I need to fix some phantom force in the solver
     private static final int SYNC_INTERVAL_TICKS = 2;
 
 
@@ -96,6 +110,14 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
     public static final int LIFT_STEPS = 8;
     public static final int MAX_LIFT_STEPS = 24;
     public static final double LIFT_STEP_HEIGHT = MAX_LIFT / LIFT_STEPS;
+
+    //telemetry for offroad assist
+    public static final int ASSIST_OFF = 0;
+    public static final int ASSIST_AIRBORNE = 1;
+    public static final int ASSIST_SLOPE_OK = 2;
+    public static final int ASSIST_NO_RISE = 3;
+    public static final int ASSIST_ACTIVE = 4;
+
 
     private static final double TIRE_SPEED_COOL = 0.25;
 
@@ -161,9 +183,9 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
             return TerrainAssistSpec.DEFAULT;
         }
 
-        public double staticSagBlocks() {
+        public double staticSagBlocks(double gravity) {
             double omega0 = 2.0 * Math.PI * naturalFreqHz();
-            return 9.81 / (omega0 * omega0);
+            return gravity / (omega0 * omega0);
         }
 
         public String getDisplayName() {
@@ -208,6 +230,11 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
         double telemVLon;
         double telemVLat;
         double telemLongForce;
+        double telemPeakForce;
+        double telemSlipCombined;
+        double telemSlipAtPeak;
+        double telemCurveForce;
+        boolean telemModelSlip;
         double telemLatForce;
         double telemWheelSpeed;
         double telemCompression;
@@ -227,6 +254,12 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
         double telemDampFraction = Double.NaN;
         double telemAssistLift = Double.NaN;
         double assistLift;
+        double telemHardpointY = Double.NaN;
+        double telemRigidRaw = Double.NaN;
+        double telemAssistTarget;
+        double telemAssistRise;
+        double telemAssistProbeD;
+        int telemAssistWhy;
         double telemGripUse;
         double latUse;
         double telemGripLon;
@@ -264,7 +297,11 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
                                  double effMassKg, double hardpointVMs, double springForceN,
                                  double velWorld, double velBody, double velDiff, double velNormal,
                                  double castLift, double dampFraction, double assistLift,
-                                 double gripUse, double gripLon, double gripLat) {
+                                 double gripUse, double gripLon, double gripLat,
+                                 double peakForceN, double slipCombined, double slipAtPeak,
+                                 double curveForceN,
+                                 double hardpointY, double rigidRawM, double assistTargetM,
+                                 double assistRiseM, double assistProbeM, int assistWhy) {
     }
 
     public WheelTelemetry getTelemetry(WheelSide side) {
@@ -277,7 +314,10 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
                 w.telemHardpointVel, w.telemSpringForce,
                 w.telemVelWorld, w.telemVelBody, w.telemVelDiff, w.telemVelNormal, w.telemCastLift,
                 w.telemDampFraction, w.telemAssistLift, w.telemGripUse,
-                w.telemGripLon, w.telemGripLat);
+                w.telemGripLon, w.telemGripLat,
+                w.telemPeakForce, w.telemSlipCombined, w.telemSlipAtPeak, w.telemCurveForce,
+                w.telemHardpointY, w.telemRigidRaw, w.telemAssistTarget,
+                w.telemAssistRise, w.telemAssistProbeD, w.telemAssistWhy);
     }
 
 
@@ -828,10 +868,12 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
         if (fullLockKmh <= 0.0 || level == null) {
             return 1.0;
         }
-        double speedKmh = Sable.HELPER.getVelocity(level, Vec3.atCenterOf(worldPosition)).length() * 3.6;
+        Vec3 vel = Sable.HELPER.getVelocity(level, Vec3.atCenterOf(worldPosition));
+        double speedKmh = Math.sqrt(vel.x * vel.x + vel.z * vel.z) * 3.6;
         if (speedKmh <= fullLockKmh) {
             return 1.0;
         }
+
         double aeroKmh = Config.STEER_ASSIST_AERO_SPEED.getAsDouble();
         if (aeroKmh <= 0.0) {
             double ratio = fullLockKmh / speedKmh;
@@ -862,6 +904,25 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
     // Physics substep
     // ================
 
+    // more telemetry
+    public double getCachedCarMass() {
+        return cachedCarMass;
+    }
+
+    public double getScaledWheelMass() {
+        return wheelMass();
+    }
+
+    public double getSprungMassPerWheel() {
+        return sprungMassPerWheel;
+    }
+
+    // omega*dt of the corner's body mode. Over 2 the integrator cannot hold it, over BODY_SUBSTEP_LIMIT
+    // this axle is substepping the hardpoint to compensate
+    public double getBodyModeOmegaDt() {
+        return bodyModeOmegaDt;
+    }
+
     // gotta use the right mass here, was using InvNormalMass before, which is wrong
     private double sprungMassPerWheel(ServerSubLevel subLevel, MassData massData) {
         long now = level.getGameTime();
@@ -876,9 +937,7 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
             }
             cachedWheelCount = Math.max(1, count);
         }
-        double unsprung = cachedWheelCount * wheelMass();
-        double sprung = Math.max(1.0, massData.getMass() - unsprung);
-        return sprung / cachedWheelCount;
+        return Math.max(1.0, massData.getMass()) / cachedWheelCount;
     }
 
     @Override
@@ -895,6 +954,7 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
         this.sprungMassPerWheel = sprungMassPerWheel(subLevel, massData);
         Vector3d carVel = new Vector3d(subLevel.latestLinearVelocity);
         this.cachedCarSpeed = Math.sqrt(carVel.x * carVel.x + carVel.z * carVel.z);
+        this.cachedGravity = Gravity.of(level);
 
         boolean queued = false;
         queued |= stepWheel(WheelSide.LEFT, subLevel, pose, massData, timeStep);
@@ -951,9 +1011,21 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
     // Advances the wheel between the suspension spring and the tyre spring, returns the force the suspension puts into the body
     private double stepUnsprung(WheelState wheel, double rateMass, double rigidLength,
                                 double hardpointVel, double responseMass, double dt) {
-        double springK = TireModel.springRate(rateMass, setting.naturalFreqHz());
         boolean rebound = hardpointVel > 0.0;
-        double springC = TireModel.springDamping(rateMass, setting.naturalFreqHz(),
+        double springK = TireModel.springRate(rateMass, setting.naturalFreqHz());
+
+        // Roll stiffness is 4*k*b^2 against Ixx; a given corners roll mode runs at sqrt(springK/responseMass)
+        // semi implicit euler works here only to omega*dt < 2 based on my tests, alternates/vibrates real bad past that.
+        // This can happen if the car is built like a pencil with no weight on either side of a 1 block chassis.
+        // The solution for now is measuring that value and scaling frequency down when needed
+        double omegaDtRaw = responseMass > 1.0e-9 ? Math.sqrt(springK / responseMass) * dt : 0.0;
+        bodyModeOmegaDt = omegaDtRaw;
+        double freqHz = setting.naturalFreqHz();
+        if (omegaDtRaw > MAX_BODY_MODE_OMEGA_DT) {
+            freqHz *= MAX_BODY_MODE_OMEGA_DT / omegaDtRaw;
+            springK = TireModel.springRate(rateMass, freqHz);
+        }
+        double springC = TireModel.springDamping(rateMass, freqHz,
                 setting.dampingRatio(), rebound);
         double tireK = springK * Config.TIRE_STIFFNESS_RATIO.getAsDouble();
         double unsprungMass = wheelMass();
@@ -977,7 +1049,7 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
             double strutC = TireModel.digressiveDamping(springC, hardpointVel - wheel.unsprungVel,
                     setting.damper());
             wheel.unsprungVel = TireModel.solveUnsprung(unsprungMass, h, wheel.unsprungVel, hardpointVel,
-                    springK, strutC, compression, tireK, tireC, deflection);
+                    springK, strutC, compression, tireK, tireC, deflection, cachedGravity);
             wheel.springLength = Mth.clamp(wheel.springLength + h * (hardpointVel - wheel.unsprungVel),
                     restLength() - MAX_TRAVEL, restLength() + MAX_DROOP_RENDER);
             groundLength += h * hardpointVel;
@@ -991,7 +1063,8 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
         double strutVel = wheel.unsprungVel - hardpointVel;
         double bodyC = TireModel.effectiveDamping(springC, strutVel, setting.damper(), dt, responseMass);
         wheel.telemDampFraction = springC > 0.0 ? bodyC / springC : 1.0;
-        return Math.max(0.0, springK * newCompression + bodyC * strutVel);
+
+        return springK * newCompression + bodyC * strutVel;
     }
 
     private boolean stepWheel(WheelSide side, ServerSubLevel subLevel, Pose3d pose, MassData massData,
@@ -1032,6 +1105,8 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
                 * MassScale.measured(cachedCarMass) * radius;
 
         if (!grounded) {
+            double airborneVel = Sable.HELPER.getVelocity(level, subLevel, hardpointJoml, new Vector3d()).y;
+            wheel.unsprungVel = Mth.lerp(0.4, wheel.unsprungVel, airborneVel);
             wheel.springLength = Mth.clamp(Mth.lerp(0.4, wheel.springLength, restLength() + MAX_DROOP_RENDER),
                     restLength() - MAX_TRAVEL, restLength() + MAX_DROOP_RENDER);
             wheel.omega = TireModel.integrateSpin(wheel.omega, radius, wheelInertia, driveTorquePerWheel,
@@ -1041,6 +1116,10 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
             wheel.telemLatForce = 0.0;
             wheel.telemSlipRatio = 0.0;
             wheel.telemSlipAngleRad = 0.0;
+            wheel.telemPeakForce = 0.0;
+            wheel.telemSlipCombined = 0.0;
+            wheel.telemSlipAtPeak = 0.0;
+            wheel.telemCurveForce = 0.0;
             wheel.telemGripUse = 0.0;
             wheel.latUse = 0.0;
             wheel.telemGripLon = 0.0;
@@ -1071,6 +1150,7 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
 
         // overload
         Vector3d velocity = Sable.HELPER.getVelocity(level, subLevel, hardpointJoml, new Vector3d());
+        velocity.y += cachedGravity * dt / GRAVITY_READ_DIVISOR; // Sable does this same subtraction in ServerSubLevel.prePhysicsTick but doesnt expose it
         Vector3d localVelocity = pose.transformNormalInverse(velocity);
 
         double hardpointVel = velocity.y;
@@ -1122,9 +1202,12 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
         }
 
         wheel.telemVelNormal = localVelocity.dot(hitNormal); // hitNormal is already in body space here, so the velocity has to be rotated the same way before projecting
-
-        springForce *= Mth.clamp(1.0 / Math.max(0.5, hitNormal.y), 1.0, 2.0);
-        springForce = Math.min(springForce, Config.MAX_CORNERING_G.getAsDouble() * rateMass * 9.81);
+        
+        if (springForce > 0.0) {
+            springForce *= Mth.clamp(1.0 / Math.max(0.5, hitNormal.y), 1.0, 2.0);
+        }
+        double forceCap = Config.MAX_CORNERING_G.getAsDouble() * rateMass * cachedGravity;
+        springForce = Mth.clamp(springForce, -forceCap, forceCap);
 
         Vector3d springImpulse = new Vector3d(hitNormal).mul(springForce * dt);
         forceTotal.applyImpulseAtPoint(massData, hardpointJoml, springImpulse);
@@ -1144,7 +1227,7 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
         double normalForce = springForce;
         if (Config.TIRE_COMPLIANCE.get()) {
             normalForce = Math.min(wheel.contactLoad,
-                    Config.MAX_CORNERING_G.getAsDouble() * rateMass * 9.81);
+                    Config.MAX_CORNERING_G.getAsDouble() * rateMass * cachedGravity);
         }
         double vLon = localVelocity.dot(forward);
         double vLat = localVelocity.dot(axle);
@@ -1343,6 +1426,13 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
             // this part is from Chrono's ChTMeasyTire 'Advanced' & 'tmxy_combined'
             TireModel.tmeasyCombined(tm, sc, df0, sm, fm, ss, fs);
             double f = tm[0];
+            wheel.telemPeakForce = peakForce;
+            wheel.telemSlipCombined = sc;
+            wheel.telemSlipAtPeak = sm;
+            wheel.telemCurveForce = f;
+            wheel.telemSlipRatio = sx;
+            wheel.telemSlipAngleRad = Math.atan(sy);
+            wheel.telemModelSlip = true;
             double forwardForce = sc > 1.0e-9 ? f * cphi : 0.0;
             double lateralForce = sc > 1.0e-9 ? f * sphi : 0.0;
 
@@ -1436,8 +1526,11 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
         wheel.telemLoad = normalForce;
         wheel.telemVLon = vLon;
         wheel.telemVLat = vLat;
-        wheel.telemSlipRatio = (wheel.omega * radius - vLon) / Math.max(Math.abs(vLon), 2.0);
-        wheel.telemSlipAngleRad = Math.atan2(vLat, Math.max(Math.abs(vLon), 0.05));
+        if (!wheel.telemModelSlip) {
+            wheel.telemSlipRatio = (wheel.omega * radius - vLon) / Math.max(Math.abs(vLon), 2.0);
+            wheel.telemSlipAngleRad = Math.atan2(vLat, Math.max(Math.abs(vLon), 0.05));
+        }
+        wheel.telemModelSlip = false;
         wheel.telemLongForce = forwardImpulse / dt;
         wheel.telemLatForce = sideImpulse / dt;
         wheel.telemWheelSpeed = wheel.omega * radius;
@@ -1640,6 +1733,8 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
         }
         this.lastCastLift = centerDist - (minRigid + radius);
 
+        wheel.telemRigidRaw = minRigid;
+        wheel.telemHardpointY = wheelCenter.y;
         double assist = offroadAssistLift(wheelCenter, forward, pose, radius, minRigid, wheel, dt);
         this.lastAssistLift = assist;
         return new TerrainCastResult(minRigid - assist + radius, minNormal, minHitSubLevel, minHitBlock);
@@ -1649,22 +1744,40 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
     private double offroadAssistLift(Vec3 wheelCenter, Vector3d forward, Pose3dc pose, double radius,
                                      double rigidHere, WheelState wheel, double dt) {
         TerrainAssistSpec spec = setting.terrainAssist();
+        wheel.telemAssistTarget = 0.0;
+        wheel.telemAssistRise = 0.0;
+        wheel.telemAssistProbeD = 0.0;
         if (!spec.enabled() || !Config.OFFROADING_ASSIST.getAsBoolean()) {
+            wheel.telemAssistWhy = ASSIST_OFF;
             wheel.assistLift = 0.0;
             return 0.0;
         }
-        double speed = this.cachedCarSpeed;
-        double maxSlope = speed > 0.05 ? spec.maxVerticalRate() / speed : Double.MAX_VALUE;
-        if (!Double.isFinite(maxSlope) || maxSlope >= 1.0) {
-            // assist does nothing for more than 45 degree slope, so a 1 block step
+
+        if (rigidHere > restLength() + GROUND_MARGIN) {
+            wheel.telemAssistWhy = ASSIST_AIRBORNE;
             return releaseAssist(wheel, spec, dt);
         }
-        double maxClimb = radius * spec.maxClimbFraction();
-        double lookAhead = spec.lookAheadBlocks();
+
+        boolean extra = Config.OFFROADING_ASSIST_EXTRA.getAsBoolean();
+        double maxClimb = extra ? Math.max(radius * spec.maxClimbFraction(), spec.extraMaxClimbBlocks())
+                : radius * spec.maxClimbFraction();
+        double lookAhead = extra ? spec.extraLookAheadBlocks() : spec.lookAheadBlocks();
+
+        double speed = this.cachedCarSpeed;
+        double maxSlope = speed > 0.05 ? spec.maxVerticalRate() / speed : Double.MAX_VALUE;
+        if (extra) {
+            maxSlope = Math.min(maxSlope, spec.extraMaxSlope());
+        } else if (!Double.isFinite(maxSlope) || maxSlope >= 1.0) {
+            wheel.telemAssistWhy = ASSIST_SLOPE_OK;
+            return releaseAssist(wheel, spec, dt);
+        }
+
+        int probes = Mth.clamp((int) Math.ceil(lookAhead / ASSIST_PROBE_SPACING),
+                ASSIST_PROBES, MAX_ASSIST_PROBES);
         double best = 0.0;
         Vec3 forwardVec = JOMLConversion.toMojang(forward);
-        for (int i = 1; i <= ASSIST_PROBES; i++) {
-            double d = lookAhead * i / ASSIST_PROBES;
+        for (int i = 1; i <= probes; i++) {
+            double d = lookAhead * i / probes;
             double rigidAhead = probeGroundRigid(wheelCenter.add(forwardVec.scale(d)), pose, radius);
             if (Double.isNaN(rigidAhead)) {
                 continue;
@@ -1673,9 +1786,17 @@ public class SuspensionBlockEntity extends SmartBlockEntity implements BlockEnti
             if (rise <= 0.0 || rise > maxClimb) {
                 continue;
             }
-            best = Math.max(best, rise - maxSlope * d);
+            double lift = rise - maxSlope * d;
+            if (lift > best) {
+                best = lift;
+                wheel.telemAssistRise = rise;
+                wheel.telemAssistProbeD = d;
+            }
         }
-        return rateLimitAssist(wheel, spec, dt, Math.max(0.0, best));
+        double target = Math.max(0.0, best);
+        wheel.telemAssistTarget = target;
+        wheel.telemAssistWhy = target > 0.0 ? ASSIST_ACTIVE : ASSIST_NO_RISE;
+        return rateLimitAssist(wheel, spec, dt, target);
     }
 
     // moves stored lift toward target no more than maxVerticalRate
