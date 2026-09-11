@@ -280,7 +280,7 @@ public class CreateMotorsport {
     public static final DeferredHolder<CreativeModeTab, CreativeModeTab> TRAILER_TAB =
             CREATIVE_MODE_TABS.register("trailer", () -> CreativeModeTab.builder()
                     .title(Component.translatable("itemGroup.createmotorsport.trailer"))
-                    .withTabsBefore(MOTORSPORT_TAB.getKey())
+                    .withTabsAfter(MOTORSPORT_TAB.getKey())
                     .icon(() -> TRUCK_ENGINE_BLOCK_ITEM.get().getDefaultInstance())
                     .displayItems((parameters, output) -> {
                         output.accept(com.createmotorsport.trailer.TrailerRegistry.FIFTH_WHEEL.get());
