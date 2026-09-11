@@ -265,24 +265,6 @@ public class CreateMotorsport {
                     .displayItems((parameters, output) -> {
                         output.accept(FUEL_PUMP_ITEM.get());
                         output.accept(FUEL_TANK_ITEM.get());
-                        output.accept(ENGINE_BLOCK_ITEM.get());
-                        output.accept(SUSPENSION_ITEM.get());
-                        output.accept(STEERING_WHEEL_ITEM.get());
-                        output.accept(DOWN_FLAP_ITEM.get());
-                        output.accept(AIR_INTAKE.get());
-                        output.accept(EXHAUST_MANIFOLD.get());
-                        output.accept(SUSPENSION_WRENCH.get());
-                        output.accept(LAP_GATE_ITEM.get());
-                        output.accept(RACING_COMPONENT.get());
-                        output.accept(RACING_TIRE.get());
-                    })
-                    .build());
-    public static final DeferredHolder<CreativeModeTab, CreativeModeTab> TRAILER_TAB =
-            CREATIVE_MODE_TABS.register("trailer", () -> CreativeModeTab.builder()
-                    .title(Component.translatable("itemGroup.createmotorsport.trailer"))
-                    .withTabsAfter(MOTORSPORT_TAB.getKey())
-                    .icon(() -> TRUCK_ENGINE_BLOCK_ITEM.get().getDefaultInstance())
-                    .displayItems((parameters, output) -> {
                         output.accept(com.createmotorsport.trailer.TrailerRegistry.FIFTH_WHEEL.get());
                         output.accept(com.createmotorsport.trailer.TrailerRegistry.LARGE_FIFTH_WHEEL.get());
                         output.accept(com.createmotorsport.trailer.TrailerRegistry.KINGPIN.get());
@@ -292,11 +274,21 @@ public class CreateMotorsport {
                         output.accept(com.createmotorsport.trailer.TrailerRegistry.LANDING_LEGS.get());
                         output.accept(com.createmotorsport.trailer.TrailerRegistry.CONTROL_PANEL.get());
                         output.accept(com.createmotorsport.trailer.TrailerRegistry.LINKER.get());
+                        output.accept(ENGINE_BLOCK_ITEM.get());
                         output.accept(TRUCK_ENGINE_BLOCK_ITEM.get());
                         output.accept(SUSPENSION_ITEM.get());
-                    output.accept(TRUCK_TIRE.get());
+                        output.accept(STEERING_WHEEL_ITEM.get());
+                        output.accept(DOWN_FLAP_ITEM.get());
+                        output.accept(AIR_INTAKE.get());
+                        output.accept(EXHAUST_MANIFOLD.get());
+                        output.accept(SUSPENSION_WRENCH.get());
+                        output.accept(LAP_GATE_ITEM.get());
+                        output.accept(RACING_COMPONENT.get());
+                        output.accept(RACING_TIRE.get());
+                        output.accept(TRUCK_TIRE.get());
                     })
                     .build());
+
     public CreateMotorsport(IEventBus modEventBus, ModContainer modContainer) {
         com.createmotorsport.trailer.TrailerRegistry.init();
         modContainer.registerConfig(ModConfig.Type.SERVER, com.createmotorsport.trailer.TrailerConfig.SPEC, "createmotorsport-trailers.toml");

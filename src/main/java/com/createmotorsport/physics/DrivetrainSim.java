@@ -64,9 +64,8 @@ public final class DrivetrainSim {
      * @param dt            tick length (s)
      * @return torque delivered to the driven wheels in newton-meters (Nm), signed (negative in reverse)
      */
-    private boolean pitLimiter;
     public double update(boolean running, double throttle, boolean clutchHeld, boolean semiAuto,
-                         boolean shiftUpEdge, boolean shiftDownEdge, double wheelOmega, double dt, boolean pitLimiter) {
+                         boolean shiftUpEdge, boolean shiftDownEdge, double wheelOmega, double dt) {
         double engineScale = MassScale.design(this.spec.designVehicleMassBlocks());
         double inertia = Config.ENGINE_INERTIA.getAsDouble() * engineScale;
         double omega = this.rpm / RAD_TO_RPM;
@@ -101,18 +100,7 @@ public final class DrivetrainSim {
         double idleThrottle = Mth.clamp(idleHoldThrottle() + idleErr * IDLE_GAIN, 0.0, 0.6);
         double driverThrottle = shiftDip ? 0.0 : throttle;
         double effThrottle = Math.max(driverThrottle, idleThrottle);
-        this.pitLimiter = pitLimiter;
-        if (pitLimiter) {
-            double limit = 12000.0; //Seems good enough
 
-            if (this.rpm > limit) {
-                effThrottle *= Mth.clamp(
-                    1.0 - (this.rpm - limit) / 1000.0,
-                    0.0,
-                    1.0
-                );
-            }
-        }
         double tEng = netEngineTorque(effThrottle, omega);
 
         double absRatio = Math.abs(ratio);
@@ -173,9 +161,6 @@ public final class DrivetrainSim {
         }
 
         this.rpm = clampOmega(omegaNew, maxOmega) * RAD_TO_RPM;
-        if (pitLimiter && this.rpm > 12000) {
-            this.rpm = 12000.0; //what is the pit lim rpm?, apperantly no one enter the pitlane (before the line) at higher gear than 1st gear, so 12k at 1st gear is ~~80kph
-        }
 
         double wheelTorque = tClutch * ratio * this.spec.drivelineEfficiency();
         return record(tEng, ratio, wheelTorque, locked);
